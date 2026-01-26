@@ -40,7 +40,7 @@ let
             if name == "self" then
               flake.legacyPackages.${system} or { } // unfilteredPackages.${system}
             else
-              _: flake: flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
+              flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
           ) inputs;
 
           # Handle nixpkgs specially.
