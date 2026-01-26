@@ -40,7 +40,7 @@ let
             if name == "self" then
               flake.legacyPackages.${system} or { } // unfilteredPackages.${system}
             else
-              flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
+              _: flake: flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
           ) inputs;
 
           # Handle nixpkgs specially.
@@ -54,7 +54,7 @@ let
                 overlays = nixpkgs.overlays or [ ];
               };
         in
-        lib.makeScope lib.callPackageWith (_: {
+        lib.makeScope lib.callPackageWith (_: pkgs // {
           inherit
             inputs
             perSystem
@@ -243,6 +243,25 @@ let
             };
         in
         lib.optional (builtins.hasAttr hostname homesNested) module;
+      homesGeneric =
+        let
+          getEntryPath =
+            _username: userEntry:
+            if builtins.pathExists (userEntry.path + "/home-configuration.nix") then
+              userEntry.path + "/home-configuration.nix"
+            else
+              # If we decide to add users/<username>.nix, it's as simple as
+              # testing `if userEntry.type == "regular"`
+              null;
+
+          mkUsers =
+            userEntries:
+            let
+              users = lib.mapAttrs getEntryPath userEntries;
+            in
+            lib.filterAttrs (_name: value: value != null) users;
+        in
+        importDir (src + "/users") mkUsers;
 
       # Attribute set mapping hostname (defined in hosts/) to a set of home
       # configurations (modules) for that host. If a host has no home
@@ -336,7 +355,10 @@ let
                 inherit (homeData) modulePath username;
                 inherit pkgs system;
               }
-            ) homesFlat;
+            ) homesFlat
+              // lib.mapAttrs (
+                username: modulePath: mkHomeConfiguration { inherit pkgs username modulePath; }
+              ) homesGeneric;
           }
         );
 
@@ -629,7 +651,7 @@ let
       # nix3 CLI output (`packages` output expects flat attrset)
       # FIXME: Find another way to make this work without introducing legacyPackages.
       #        May involve changing upstream home-manager.
-      legacyPackages = lib.optionalAttrs (homesNested != { }) standaloneHomeConfigurations;
+      legacyPackages = standaloneHomeConfigurations // lib.optionalAttrs (homesNested != { }) standaloneHomeConfigurations;
 
       darwinConfigurations = lib.mapAttrs (_: x: x.value) (hostsByCategory.darwinConfigurations or { });
       nixosConfigurations = lib.mapAttrs (_: x: x.value) (hostsByCategory.nixosConfigurations or { });
