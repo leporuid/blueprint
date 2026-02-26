@@ -14,33 +14,16 @@ in rec {
       flake,
       systems,
       nixpkgs,
-      # We need to treat the packages that are being defined in self differently,
-      # since otherwise we trigger infinite recursion when perSystem is defined in
-      # terms of the packages defined by self, and self uses perSystem to define
-      # its packages.
-      # We run into the infrec when trying to filter out packages based on their
-      # meta attributes, since that actually requires evaluating the package's derivation
-      # and can then in turn change the value of perSystem (by removing packages),
-      # which then requires to evaluate the package again, and so on and so forth.
-      # To break this cycle, we define perSystem in terms of the filesystem hierarchy,
-      # and not based on self.packages, and we don't apply any filtering based on
-      # meta attributes yet.
-      # The actual self.packages, can then be the filtered set of packages.
-      unfilteredPackages,
     }:
     let
+
       # Memoize the args per system
       systemArgs = lib.genAttrs systems (
         system:
         let
           # Resolve the packages for each input.
           perSystem = lib.mapAttrs (
-            name: flake:
-            # For self, we need to treat packages differently, see above
-            if name == "self" then
-              flake.legacyPackages.${system} or { } // unfilteredPackages.${system}
-            else
-              flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
+            _: flake: flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
           ) inputs;
 
           # Handle nixpkgs specially.
@@ -75,29 +58,6 @@ in rec {
 
   # Imports the path and pass the `args` to it if it exists, otherwise, return an empty attrset.
   tryImport = path: args: optionalPathAttrs path (path: import path args);
-
-  # Maps all the toml files in a directory to name -> path.
-  importTomlFilesAt =
-    path: fn:
-    let
-      entries = builtins.readDir path;
-
-      # Get paths to toml files, where the name is the basename of the file without the .toml extension
-      nixPaths = builtins.removeAttrs (lib.mapAttrs' (
-        name: type:
-        let
-          nixName = builtins.match "(.*)\\.toml" name;
-        in
-        {
-          name = if type == "directory" || nixName == null then "__junk" else (builtins.head nixName);
-          value = {
-            path = path + "/${name}";
-            type = type;
-          };
-        }
-      ) entries) [ "__junk" ];
-    in
-    lib.optionalAttrs (builtins.pathExists path) (fn nixPaths);
 
   # Maps all the nix files and folders in a directory to name -> path.
   importDir =
@@ -175,7 +135,6 @@ in rec {
             flake
             nixpkgs
             systems
-            unfilteredPackages
             ;
         })
         eachSystem
@@ -183,45 +142,15 @@ in rec {
         ;
 
       # Adds the perSystem argument to the NixOS and Darwin modules
-      perSystemArgsModule = system: {
-        _module.args.perSystem = systemArgs.${system}.perSystem;
-      };
-
       perSystemModule =
-        { config, lib, ... }:
+        { pkgs, ... }:
         {
-          imports = [ (perSystemArgsModule config.nixpkgs.hostPlatform.system) ];
-        };
-
-      perSystemHMModule =
-        { osConfig, ... }:
-        {
-          imports = [ (perSystemArgsModule osConfig.nixpkgs.hostPlatform.system) ];
-        };
-
-      perSystemSMModule =
-        { config, lib, ... }:
-        {
-          imports = [ (perSystemArgsModule config.nixpkgs.hostPlatform) ];
+          _module.args.perSystem = systemArgs.${pkgs.stdenv.hostPlatform.system}.perSystem;
         };
 
       home-manager =
         inputs.home-manager
           or (throw ''home configurations require Home Manager. To fix this, add `inputs.home-manager.url = "github:nix-community/home-manager";` to your flake'');
-
-      devshellFromTOML =
-        perSystem: path:
-        let
-          devshell =
-            perSystem.devshell
-              or (throw ''Loading TOML devshells requires `inputs.devshell.url = "github:numtide/devshell";` in your flake'');
-        in
-        devshell.mkShell {
-          _module.args = {
-            inherit perSystem;
-          }; # so that devshell modules can access self exported packages.
-          imports = [ (devshell.importTOML path) ];
-        };
 
       # Sets up declared users without any user intervention, and sets the
       # options that most people would set anyway. The module is only returned
@@ -232,10 +161,10 @@ in rec {
         hostname: homeManagerModule:
         let
           module =
-            { perSystem, config, ... }:
+            { perSystem, ... }:
             {
               imports = [ homeManagerModule ];
-              home-manager.sharedModules = [ perSystemHMModule ];
+              home-manager.sharedModules = [ perSystemModule ];
               home-manager.extraSpecialArgs = specialArgs;
               home-manager.users = homesNested.${hostname};
               home-manager.useGlobalPkgs = lib.mkDefault true;
@@ -308,13 +237,12 @@ in rec {
               username,
               modulePath,
               pkgs,
-              system,
             }:
             home-manager.lib.homeManagerConfiguration {
               inherit pkgs;
               extraSpecialArgs = specialArgs;
               modules = [
-                (perSystemArgsModule system)
+                perSystemModule
                 modulePath
                 (
                   { config, ... }:
@@ -348,15 +276,16 @@ in rec {
           ) homesNested;
         in
         eachSystem (
-          { pkgs, system, ... }:
+          { pkgs, ... }:
           {
-            homeConfigurations = lib.mapAttrs (
-              _name: homeData:
-              mkHomeConfiguration {
-                inherit (homeData) modulePath username;
-                inherit pkgs system;
-              }
-            ) homesFlat
+            homeConfigurations =
+              lib.mapAttrs (
+                _name: homeData:
+                mkHomeConfiguration {
+                  inherit (homeData) modulePath username;
+                  inherit pkgs;
+                }
+              ) homesFlat
               // lib.mapAttrs (
                 username: modulePath: mkHomeConfiguration { inherit pkgs username modulePath; }
               ) homesGeneric;
@@ -368,45 +297,21 @@ in rec {
         let
           loadDefaultFn = { class, value }@inputs: inputs;
 
-          loadDefault = hostName: path: loadDefaultFn (import path { inherit flake inputs hostName; });
+          loadDefault = path: loadDefaultFn (import path { inherit flake inputs; });
 
-          loadNixOS = hostName: path: {
+          loadNixOS = hostname: path: {
             class = "nixos";
             value = inputs.nixpkgs.lib.nixosSystem {
               modules = [
                 perSystemModule
                 path
-              ] ++ mkHomeUsersModule hostName home-manager.nixosModules.default;
-              specialArgs = specialArgs // {
-                inherit hostName;
-              };
+              ] ++ mkHomeUsersModule hostname home-manager.nixosModules.default;
+              inherit specialArgs;
             };
           };
 
-          loadNixOSRPi =
-            hostName: path:
-            let
-              nixos-raspberrypi =
-                inputs.nixos-raspberrypi
-                  or (throw ''${path} depends on nixos-raspberrypi. To fix this, add `inputs.nixos-raspberrypi.url = "github:nvmd/nixos-raspberrypi";` to your flake'');
-            in
-            {
-              class = "nixos";
-              value = nixos-raspberrypi.lib.nixosSystem {
-                modules = [
-                  perSystemModule
-                  path
-                ]
-                ++ mkHomeUsersModule hostName home-manager.nixosModules.default;
-                specialArgs = specialArgs // {
-                  inherit hostName;
-                  nixos-raspberrypi = inputs.nixos-raspberrypi;
-                };
-              };
-            };
-
           loadNixDarwin =
-            hostName: path:
+            hostname: path:
             let
               nix-darwin =
                 inputs.nix-darwin
@@ -418,30 +323,8 @@ in rec {
                 modules = [
                   perSystemModule
                   path
-                ] ++ mkHomeUsersModule hostName home-manager.darwinModules.default;
-                specialArgs = specialArgs // {
-                  inherit hostName;
-                };
-              };
-            };
-
-          loadSystemManager =
-            hostName: path:
-            let
-              system-manager =
-                inputs.system-manager
-                  or (throw ''${path} depends on system-manager. To fix this, add `inputs.system-manager.url = "github:numtide/system-manager"; to your flake'');
-            in
-            {
-              class = "system-manager";
-              value = system-manager.lib.makeSystemConfig {
-                modules = [
-                  perSystemSMModule
-                  path
-                ];
-                extraSpecialArgs = specialArgs // {
-                  inherit hostName;
-                };
+                ] ++ mkHomeUsersModule hostname home-manager.darwinModules.default;
+                inherit specialArgs;
               };
             };
 
@@ -449,15 +332,11 @@ in rec {
             name:
             { path, type }:
             if builtins.pathExists (path + "/default.nix") then
-              loadDefault name (path + "/default.nix")
+              loadDefault (path + "/default.nix")
             else if builtins.pathExists (path + "/configuration.nix") then
               loadNixOS name (path + "/configuration.nix")
-            else if builtins.pathExists (path + "/rpi-configuration.nix") then
-              loadNixOSRPi name (path + "/rpi-configuration.nix")
             else if builtins.pathExists (path + "/darwin-configuration.nix") then
               loadNixDarwin name (path + "/darwin-configuration.nix")
-            else if builtins.pathExists (path + "/system-configuration.nix") then
-              loadSystemManager name (path + "/system-configuration.nix")
             else if builtins.hasAttr name homesNested then
               # If there are any home configurations defined for this host, they
               # must be standalone configurations since there is no OS config.
@@ -478,12 +357,6 @@ in rec {
             "nixosConfigurations"
           else if x.value.class == "nix-darwin" then
             "darwinConfigurations"
-          else if x.value.class == "system-manager" then
-            "systemConfigs"
-          else if x.value.class == "robotnix" then
-            "robotnixConfigurations"
-          else if x.value.class == "nix-on-droid" then
-            "nixOnDroidConfigurations"
           else
             throw "host '${x.name}' of class '${x.value.class or "unknown"}' not supported"
         ) (lib.attrsToList hosts)
@@ -529,9 +402,42 @@ in rec {
             )
           )
         );
+    in
+    # FIXME: maybe there are two layers to this. The blueprint, and then the mapping to flake outputs.
+    {
+      formatter = eachSystem (
+        { pkgs, perSystem, ... }:
+        perSystem.self.formatter or pkgs.nixfmt-tree
+      );
 
-      # See the comment in mkEachSystem
-      unfilteredPackages =
+      lib = tryImport (src + "/lib") specialArgs;
+
+      # expose the functor to the top-level
+      # FIXME: only if it exists
+      __functor = x: inputs.self.lib.__functor x;
+
+      devShells =
+        (optionalPathAttrs (src + "/devshells") (
+          path:
+          importDir path (
+            entries:
+            eachSystem (
+              { newScope, ... }:
+              lib.mapAttrs (pname: { path, type }: newScope { inherit pname; } path { }) entries
+            )
+          )
+        ))
+        // (optionalPathAttrs (src + "/devshell.nix") (
+          path:
+          eachSystem (
+            { newScope, ... }:
+            {
+              default = newScope { pname = "default"; } path { };
+            }
+          )
+        ));
+
+      packages =
         lib.traceIf (builtins.pathExists (src + "/pkgs")) "blueprint: the /pkgs folder is now /packages"
           (
             let
@@ -549,102 +455,9 @@ in rec {
                 }));
             in
             eachSystem (
-              { newScope, system, ... }:
-              lib.mapAttrs (pname: { path, ... }: newScope { inherit pname; } path { }) entries
+              { newScope, ... }: lib.mapAttrs (pname: { path, ... }: newScope { inherit pname; } path { }) entries
             )
           );
-    in
-    # FIXME: maybe there are two layers to this. The blueprint, and then the mapping to flake outputs.
-    {
-      formatter = eachSystem (
-        { pkgs, perSystem, ... }:
-        perSystem.self.formatter or pkgs.nixfmt-tree
-      );
-
-      lib = tryImport (src + "/lib") specialArgs;
-
-      # expose the functor to the top-level
-      # FIXME: only if it exists
-      __functor = x: inputs.self.lib.__functor x;
-
-      devShells =
-        let
-          namedNix = (
-            optionalPathAttrs (src + "/devshells") (
-              path:
-              (importDir path (
-                entries:
-                eachSystem (
-                  { newScope, ... }:
-                  lib.mapAttrs (pname: { path, type }: newScope { inherit pname; } path { }) (
-                    lib.filterAttrs (
-                      _name:
-                      { path, type }:
-                      type == "regular" || (type == "directory" && lib.pathExists "${path}/default.nix")
-                    ) entries
-                  )
-                )
-              ))
-            )
-          );
-
-          namedToml = (
-            optionalPathAttrs (src + "/devshells") (
-              path:
-              (importTomlFilesAt path (
-                entries:
-                eachSystem (
-                  { newScope, perSystem, ... }:
-                  lib.mapAttrs (
-                    pname: { path, type }: newScope { inherit pname; } (_: devshellFromTOML perSystem path) { }
-                  ) entries
-                )
-              ))
-            )
-          );
-
-          defaultNix = (
-            optionalPathAttrs (src + "/devshell.nix") (
-              path:
-              eachSystem (
-                { newScope, ... }:
-                {
-                  default = newScope { pname = "default"; } path { };
-                }
-              )
-            )
-          );
-
-          defaultToml = (
-            optionalPathAttrs (src + "/devshell.toml") (
-              path:
-              eachSystem (
-                { newScope, perSystem, ... }:
-                {
-                  default = newScope { pname = "default"; } (_: devshellFromTOML perSystem path) { };
-                }
-              )
-            )
-          );
-
-          merge =
-            prev: item:
-            let
-              systems = lib.attrNames (prev // item);
-              mergeSystem = system: { ${system} = (prev.${system} or { }) // (item.${system} or { }); };
-              mergedSystems = builtins.map mergeSystem systems;
-            in
-            lib.mergeAttrsList mergedSystems;
-        in
-        lib.foldl merge { } [
-          namedToml
-          namedNix
-          defaultToml
-          defaultNix
-        ];
-
-      # See the comment in mkEachSystem
-      packages = lib.mapAttrs filterPlatforms unfilteredPackages;
 
       # Defining homeConfigurations under legacyPackages allows the home-manager CLI
       # to automatically detect the right output for the current system without
@@ -652,13 +465,10 @@ in rec {
       # nix3 CLI output (`packages` output expects flat attrset)
       # FIXME: Find another way to make this work without introducing legacyPackages.
       #        May involve changing upstream home-manager.
-      legacyPackages = lib.optionalAttrs (homesNested != { }) standaloneHomeConfigurations;
+      legacyPackages = standaloneHomeConfigurations;
 
       darwinConfigurations = lib.mapAttrs (_: x: x.value) (hostsByCategory.darwinConfigurations or { });
       nixosConfigurations = lib.mapAttrs (_: x: x.value) (hostsByCategory.nixosConfigurations or { });
-      systemConfigs = lib.mapAttrs (_: x: x.value) (hostsByCategory.systemConfigs or { });
-      robotnixConfigurations = lib.mapAttrs (_: x: x.value) (hostsByCategory.robotnixConfigurations or { });
-      nixOnDroidConfigurations = lib.mapAttrs (_: x: x.value) (hostsByCategory.nixOnDroidConfigurations or { });
 
       inherit modules;
 
@@ -715,19 +525,23 @@ in rec {
                 lib.filterAttrs (_: x: x.pkgs.stdenv.hostPlatform.system == system) (inputs.self.darwinConfigurations or { })
               )
             ))
-            # add system-manager closures to checks
-            (withPrefix "system-" (
-              lib.mapAttrs (_: x: x) (
-                lib.filterAttrs (_: x: x.system == system) (inputs.self.systemConfigs or { })
-              )
-            ))
             # load checks from the /checks folder. Those take precedence over the others.
             (filterPlatforms system (
               optionalPathAttrs (src + "/checks") (
                 path:
                 let
                   importChecksFn = lib.mapAttrs (
-                    pname: { type, path }: import path (systemArgs.${system} // { inherit pname; })
+                    pname:
+                    { type, path }:
+                    import path {
+                      inherit
+                        pname
+                        flake
+                        inputs
+                        system
+                        pkgs
+                        ;
+                    }
                   );
                 in
 
