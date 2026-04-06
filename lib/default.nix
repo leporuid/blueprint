@@ -1070,6 +1070,109 @@ in rec {
         aarch64Value = "aarch64-linux";
       };
     };
+
+    # Tests for importDir with real filesystem
+    testImportDirRealFiles = {
+      expr =
+        let
+          result = importDir ./test-fixtures/nix-files (entries: lib.attrNames entries);
+        in
+        {
+          hasFiles = lib.length result > 0;
+          hasFoo = lib.elem "foo" result;
+          hasBar = lib.elem "bar" result;
+          hasSubdir = lib.elem "subdir" result;
+          hasIgnoredTxt = lib.elem "ignored" result;
+        };
+      expected = {
+        hasFiles = true;
+        hasFoo = true;
+        hasBar = true;
+        hasSubdir = true;
+        hasIgnoredTxt = false;  # .txt files should be ignored
+      };
+    };
+
+    testImportDirWithPaths = {
+      expr =
+        let
+          result = importDir ./test-fixtures/nix-files entriesPath;
+        in
+        {
+          hasFoo = lib.hasAttr "foo" result;
+          hasBar = lib.hasAttr "bar" result;
+          hasSubdir = lib.hasAttr "subdir" result;
+          fooIsPath = lib.isPath result.foo or false;
+          subdirIsPath = lib.isPath result.subdir or false;
+        };
+      expected = {
+        hasFoo = true;
+        hasBar = true;
+        hasSubdir = true;
+        fooIsPath = true;
+        subdirIsPath = true;
+      };
+    };
+
+    testImportDirPrecedence = {
+      expr =
+        let
+          # If both foo.nix and foo/ exist, foo.nix should take precedence
+          result = importDir ./test-fixtures/nix-files (
+            entries:
+            lib.mapAttrs (_name: { type, ... }: type) entries
+          );
+        in
+        {
+          fooType = result.foo or null;
+          barType = result.bar or null;
+          subdirType = result.subdir or null;
+        };
+      expected = {
+        fooType = "regular";
+        barType = "regular";
+        subdirType = "directory";
+      };
+    };
+
+    # Tests for importTomlFilesAt with real filesystem
+    testImportTomlFilesAtRealFiles = {
+      expr =
+        let
+          result = importTomlFilesAt ./test-fixtures/toml-files (entries: lib.attrNames entries);
+        in
+        {
+          hasFiles = lib.length result > 0;
+          hasDevshell = lib.elem "devshell" result;
+          hasOther = lib.elem "other" result;
+          count = lib.length result;
+        };
+      expected = {
+        hasFiles = true;
+        hasDevshell = true;
+        hasOther = true;
+        count = 2;
+      };
+    };
+
+    testImportTomlFilesAtWithPaths = {
+      expr =
+        let
+          result = importTomlFilesAt ./test-fixtures/toml-files entriesPath;
+        in
+        {
+          hasDevshell = lib.hasAttr "devshell" result;
+          hasOther = lib.hasAttr "other" result;
+          devshellIsPath = lib.isPath result.devshell or false;
+          otherIsPath = lib.isPath result.other or false;
+        };
+      expected = {
+        hasDevshell = true;
+        hasOther = true;
+        devshellIsPath = true;
+        otherIsPath = true;
+      };
+    };
   };
 
   # Make this callable
