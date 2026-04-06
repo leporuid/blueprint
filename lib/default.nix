@@ -792,9 +792,386 @@ in rec {
     };
 
   tests = {
+    # Basic sanity test
     testPass = {
       expr = 1;
       expected = 1;
+    };
+
+    # Tests for filterPlatforms function
+    testFilterPlatformsEmptyMetaPlatforms = {
+      expr = filterPlatforms "x86_64-linux" {
+        foo = { meta.platforms = [ ]; };
+      };
+      expected = {
+        foo = { meta.platforms = [ ]; };
+      };
+    };
+
+    testFilterPlatformsNoMetaPlatforms = {
+      expr = filterPlatforms "x86_64-linux" {
+        foo = { };
+      };
+      expected = {
+        foo = { };
+      };
+    };
+
+    testFilterPlatformsMatchingPlatform = {
+      expr = filterPlatforms "x86_64-linux" {
+        foo = { meta.platforms = [ "x86_64-linux" "aarch64-linux" ]; };
+      };
+      expected = {
+        foo = { meta.platforms = [ "x86_64-linux" "aarch64-linux" ]; };
+      };
+    };
+
+    testFilterPlatformsNonMatchingPlatform = {
+      expr = filterPlatforms "x86_64-linux" {
+        foo = { meta.platforms = [ "aarch64-darwin" "x86_64-darwin" ]; };
+      };
+      expected = { };
+    };
+
+    testFilterPlatformsMixedPackages = {
+      expr = filterPlatforms "x86_64-linux" {
+        pkgAll = { };
+        pkgLinux = { meta.platforms = [ "x86_64-linux" ]; };
+        pkgDarwin = { meta.platforms = [ "x86_64-darwin" ]; };
+        pkgEmpty = { meta.platforms = [ ]; };
+      };
+      expected = {
+        pkgAll = { };
+        pkgLinux = { meta.platforms = [ "x86_64-linux" ]; };
+        pkgEmpty = { meta.platforms = [ ]; };
+      };
+    };
+
+    # Tests for withPrefix function
+    testWithPrefixEmpty = {
+      expr = withPrefix "test-" { };
+      expected = { };
+    };
+
+    testWithPrefixSingle = {
+      expr = withPrefix "pkg-" { foo = "bar"; };
+      expected = { "pkg-foo" = "bar"; };
+    };
+
+    testWithPrefixMultiple = {
+      expr = withPrefix "check-" {
+        foo = "bar";
+        baz = "qux";
+        test = 123;
+      };
+      expected = {
+        "check-foo" = "bar";
+        "check-baz" = "qux";
+        "check-test" = 123;
+      };
+    };
+
+    testWithPrefixEmptyPrefix = {
+      expr = withPrefix "" {
+        foo = "bar";
+        baz = "qux";
+      };
+      expected = {
+        foo = "bar";
+        baz = "qux";
+      };
+    };
+
+    testWithPrefixComplexValues = {
+      expr = withPrefix "devshell-" {
+        default = { a = 1; b = 2; };
+        custom = [ 1 2 3 ];
+      };
+      expected = {
+        "devshell-default" = { a = 1; b = 2; };
+        "devshell-custom" = [ 1 2 3 ];
+      };
+    };
+
+    # Tests for entriesPath function
+    testEntriesPathEmpty = {
+      expr = entriesPath { };
+      expected = { };
+    };
+
+    testEntriesPathSingle = {
+      expr = entriesPath {
+        foo = { path = /test/foo; type = "regular"; };
+      };
+      expected = {
+        foo = /test/foo;
+      };
+    };
+
+    testEntriesPathMultiple = {
+      expr = entriesPath {
+        foo = { path = /test/foo; type = "regular"; };
+        bar = { path = /test/bar; type = "directory"; };
+        baz = { path = /test/baz.nix; type = "regular"; };
+      };
+      expected = {
+        foo = /test/foo;
+        bar = /test/bar;
+        baz = /test/baz.nix;
+      };
+    };
+
+    # Tests for optionalPathAttrs function
+    testOptionalPathAttrsNonExistent = {
+      expr = optionalPathAttrs /nonexistent/path/that/does/not/exist (path: { found = true; });
+      expected = { };
+    };
+
+    testOptionalPathAttrsExistent = {
+      expr = optionalPathAttrs ./. (path: { found = true; inherit path; });
+      expected = { found = true; path = ./.; };
+    };
+
+    # Tests for tryImport function
+    testTryImportNonExistent = {
+      expr = tryImport /nonexistent/path/that/does/not/exist { };
+      expected = { };
+    };
+
+    testTryImportExistent = {
+      expr = tryImport ./default.nix { inherit inputs; };
+      expected = rec {
+        inherit
+          mkEachSystem
+          optionalPathAttrs
+          tryImport
+          importTomlFilesAt
+          importDir
+          entriesPath
+          withPrefix
+          filterPlatforms
+          mkBlueprint'
+          mkBlueprint
+          tests
+          __functor
+          ;
+      };
+    };
+
+    # Tests for importDir with mock filesystem paths
+    # Note: These tests verify the structure, actual file reading would require real files
+    testImportDirEmpty = {
+      expr = importDir /nonexistent/empty/path (entries: entries);
+      expected = { };
+    };
+
+    # Tests for importTomlFilesAt with mock filesystem paths
+    testImportTomlFilesAtEmpty = {
+      expr = importTomlFilesAt /nonexistent/empty/path (entries: entries);
+      expected = { };
+    };
+
+    # Test that mkBlueprint is a functor
+    testFunctorExists = {
+      expr = lib.isFunction __functor;
+      expected = true;
+    };
+
+    # Test that mkBlueprint is callable
+    testMkBlueprintIsFunction = {
+      expr = lib.isFunction mkBlueprint;
+      expected = true;
+    };
+
+    # Tests for mkEachSystem basic structure
+    testMkEachSystemSingleSystem = {
+      expr =
+        let
+          result = mkEachSystem {
+            inputs = { nixpkgs = inputs.nixpkgs; self = { }; _ = { }; };
+            flake = { };
+            systems = [ "x86_64-linux" ];
+            nixpkgs = { };
+            unfilteredPackages = { "x86_64-linux" = { }; };
+          };
+        in
+        {
+          hasEachSystem = lib.isFunction result.eachSystem;
+          hasSystemArgs = lib.isAttrs result.systemArgs;
+          systemCount = lib.length (lib.attrNames result.systemArgs);
+        };
+      expected = {
+        hasEachSystem = true;
+        hasSystemArgs = true;
+        systemCount = 1;
+      };
+    };
+
+    testMkEachSystemMultipleSystems = {
+      expr =
+        let
+          result = mkEachSystem {
+            inputs = { nixpkgs = inputs.nixpkgs; self = { }; _ = { }; };
+            flake = { };
+            systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" ];
+            nixpkgs = { };
+            unfilteredPackages = {
+              "x86_64-linux" = { };
+              "aarch64-linux" = { };
+              "x86_64-darwin" = { };
+            };
+          };
+        in
+        {
+          hasEachSystem = lib.isFunction result.eachSystem;
+          hasSystemArgs = lib.isAttrs result.systemArgs;
+          systemCount = lib.length (lib.attrNames result.systemArgs);
+          hasx86_64Linux = lib.hasAttr "x86_64-linux" result.systemArgs;
+          hasaarch64Linux = lib.hasAttr "aarch64-linux" result.systemArgs;
+          hasx86_64Darwin = lib.hasAttr "x86_64-darwin" result.systemArgs;
+        };
+      expected = {
+        hasEachSystem = true;
+        hasSystemArgs = true;
+        systemCount = 3;
+        hasx86_64Linux = true;
+        hasaarch64Linux = true;
+        hasx86_64Darwin = true;
+      };
+    };
+
+    testMkEachSystemEachSystemFunction = {
+      expr =
+        let
+          result = mkEachSystem {
+            inputs = { nixpkgs = inputs.nixpkgs; self = { }; _ = { }; };
+            flake = { };
+            systems = [ "x86_64-linux" "aarch64-linux" ];
+            nixpkgs = { };
+            unfilteredPackages = {
+              "x86_64-linux" = { };
+              "aarch64-linux" = { };
+            };
+          };
+          eachSystemResult = result.eachSystem (scope: { test = scope.system; });
+        in
+        {
+          isAttrs = lib.isAttrs eachSystemResult;
+          hasLinux = lib.hasAttr "x86_64-linux" eachSystemResult;
+          hasAarch64 = lib.hasAttr "aarch64-linux" eachSystemResult;
+          linuxValue = eachSystemResult."x86_64-linux".test or null;
+          aarch64Value = eachSystemResult."aarch64-linux".test or null;
+        };
+      expected = {
+        isAttrs = true;
+        hasLinux = true;
+        hasAarch64 = true;
+        linuxValue = "x86_64-linux";
+        aarch64Value = "aarch64-linux";
+      };
+    };
+
+    # Tests for importDir with real filesystem
+    testImportDirRealFiles = {
+      expr =
+        let
+          result = importDir ./test-fixtures/nix-files (entries: lib.attrNames entries);
+        in
+        {
+          hasFiles = lib.length result > 0;
+          hasFoo = lib.elem "foo" result;
+          hasBar = lib.elem "bar" result;
+          hasSubdir = lib.elem "subdir" result;
+          hasIgnoredTxt = lib.elem "ignored" result;
+        };
+      expected = {
+        hasFiles = true;
+        hasFoo = true;
+        hasBar = true;
+        hasSubdir = true;
+        hasIgnoredTxt = false;  # .txt files should be ignored
+      };
+    };
+
+    testImportDirWithPaths = {
+      expr =
+        let
+          result = importDir ./test-fixtures/nix-files entriesPath;
+        in
+        {
+          hasFoo = lib.hasAttr "foo" result;
+          hasBar = lib.hasAttr "bar" result;
+          hasSubdir = lib.hasAttr "subdir" result;
+          fooIsPath = lib.isPath result.foo or false;
+          subdirIsPath = lib.isPath result.subdir or false;
+        };
+      expected = {
+        hasFoo = true;
+        hasBar = true;
+        hasSubdir = true;
+        fooIsPath = true;
+        subdirIsPath = true;
+      };
+    };
+
+    testImportDirPrecedence = {
+      expr =
+        let
+          # If both foo.nix and foo/ exist, foo.nix should take precedence
+          result = importDir ./test-fixtures/nix-files (
+            entries:
+            lib.mapAttrs (_name: { type, ... }: type) entries
+          );
+        in
+        {
+          fooType = result.foo or null;
+          barType = result.bar or null;
+          subdirType = result.subdir or null;
+        };
+      expected = {
+        fooType = "regular";
+        barType = "regular";
+        subdirType = "directory";
+      };
+    };
+
+    # Tests for importTomlFilesAt with real filesystem
+    testImportTomlFilesAtRealFiles = {
+      expr =
+        let
+          result = importTomlFilesAt ./test-fixtures/toml-files (entries: lib.attrNames entries);
+        in
+        {
+          hasFiles = lib.length result > 0;
+          hasDevshell = lib.elem "devshell" result;
+          hasOther = lib.elem "other" result;
+          count = lib.length result;
+        };
+      expected = {
+        hasFiles = true;
+        hasDevshell = true;
+        hasOther = true;
+        count = 2;
+      };
+    };
+
+    testImportTomlFilesAtWithPaths = {
+      expr =
+        let
+          result = importTomlFilesAt ./test-fixtures/toml-files entriesPath;
+        in
+        {
+          hasDevshell = lib.hasAttr "devshell" result;
+          hasOther = lib.hasAttr "other" result;
+          devshellIsPath = lib.isPath result.devshell or false;
+          otherIsPath = lib.isPath result.other or false;
+        };
+      expected = {
+        hasDevshell = true;
+        hasOther = true;
+        devshellIsPath = true;
+        otherIsPath = true;
+      };
     };
   };
 

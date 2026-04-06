@@ -1,0 +1,5 @@
+name = "test-devshell"
+
+[[commands]]
+name = "hello"
+command = "echo Hello"
