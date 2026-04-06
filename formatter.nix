@@ -26,7 +26,7 @@ let
       deadnix --no-lambda-pattern-names --edit "$@"
 
       # Use git to traverse since nixfmt doesn't have good traversal
-      git ls-files "$@" | grep --null '\.nix$' | xargs --no-run-if-empty nixfmt
+      git ls-files -z "$@" | grep -z '\.nix$' | xargs -0 --no-run-if-empty nixfmt
     '';
 
     meta = {
