@@ -133,7 +133,7 @@ command = "memcached"
 
 ## **Hosts** for machine configurations
 
-## `hosts/<hostname>/(default.nix|configuration.nix|darwin-configuration.nix,system-configuration.nix,rpi-configuration.nix)`
+## `hosts/<hostname>/(default.nix|configuration.nix|darwin-configuration.nix,system-configuration.nix)`
 
 Nix runs on many different operating systems and architecture. When you create a flake, you can define what systems it can produce outputs for.
 
@@ -229,30 +229,6 @@ Flake outputs:
 
 * `systemConfigs.<hostname>`
 * `checks.<system>.system-<hostname>` - contains the system closure.
-
-### `rpi-configuration.nix`
-
-Evaluates to a [nixos-raspberrypi](https://github.com/nvmd/nixos-raspberrypi) configuration.
-
-To support it, also add the following lines to the `flake.nix` file:
-
-```nix
-{
-  inputs.nixos-raspberrypi.url = "github:nvmd/nixos-raspberrypi";
-}
-```
-
-Additional values passed:
-
-* `inputs` maps to the current flake inputs.
-* `flake` maps to `inputs.self`.
-* `hostName`: the hostname of the system, which is used to generate the output names.
-* `perSystem`: contains the packages of all the inputs, filtered per system.
-    Eg: `perSystem.nixos-anywhere.default` is a shorthand for `inputs.nixos-anywhere.packages.<system>.default`.
-
-Flake outputs:
-
-* `nixosConfigurations.<hostname>`
 
 ### `default.nix`
 
@@ -377,7 +353,7 @@ maps to the "default" package.
 
 Inputs:
 
-The [per-system](#per-system) values, plus the `pname` attribute, where pname refers to the package name.
+The [per-system](#per-system) values, plus the `pname` attribute, where pname refers to the package name. To keep compatibility with the nixpkgs way of defining packages it is also possible for the inputs to be a subset of nixpkgs.
 
 Flake outputs:
 
@@ -495,21 +471,21 @@ Here we create two Blueprint folders, hosts and modules with the following subfo
 root folder
 ├── flake.nix
 ├── hosts
-│   ├── my-darwin
-│   │   ├── darwin-configuration.nix
-│   │   └── users
-│   │       └── me
-│   │           └── home-configuration.nix
-│   └── my-nixos
-│       ├── configuration.nix
-│       └── users
-│           └── me
-│               └── home-configuration.nix
+│   ├── my-darwin
+│   │   ├── darwin-configuration.nix
+│   │   └── users
+│   │       └── me
+│   │           └── home-configuration.nix
+│   └── my-nixos
+│       ├── configuration.nix
+│       └── users
+│           └── me
+│               └── home-configuration.nix
 ├── modules
-│   ├── home
-│   │   └── home-shared.nix
-│   └── nixos
-│       └── host-shared.nix
+│   ├── home
+│   │   └── home-shared.nix
+│   └── nixos
+│       └── host-shared.nix
 └── README.md
 
 ```

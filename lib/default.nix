@@ -35,12 +35,15 @@ in rec {
         let
           # Resolve the packages for each input.
           perSystem = lib.mapAttrs (
-            name: flake:
+           name: flake:
             # For self, we need to treat packages differently, see above
-            if name == "self" then
-              flake.legacyPackages.${system} or { } // unfilteredPackages.${system}
+            if name == "_" then
+               flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
             else
-              flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
+            if name == "self" then
+               flake.legacyPackages.${system} or { } // unfilteredPackages.${system}
+            else
+               flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
           ) inputs;
 
           # Handle nixpkgs specially.
@@ -54,7 +57,7 @@ in rec {
                 overlays = nixpkgs.overlays or [ ];
               };
         in
-        lib.makeScope lib.callPackageWith (_: {
+        lib.makeScope lib.callPackageWith (_: pkgs // {
           inherit
             inputs
             perSystem
@@ -182,27 +185,22 @@ in rec {
         systemArgs
         ;
 
-      # Adds the perSystem argument to the NixOS and Darwin modules
-      perSystemArgsModule = system: {
-        _module.args.perSystem = systemArgs.${system}.perSystem;
-      };
-
       perSystemModule =
-        { config, lib, ... }:
+        { pkgs, ... }:
         {
-          imports = [ (perSystemArgsModule config.nixpkgs.hostPlatform.system) ];
+          _module.args.perSystem = systemArgs.${pkgs.stdenv.hostPlatform.system}.perSystem;
         };
 
-      perSystemHMModule =
-        { osConfig, ... }:
+      nixpkgsConfigModule =
+        { lib, ... }:
         {
-          imports = [ (perSystemArgsModule osConfig.nixpkgs.hostPlatform.system) ];
-        };
-
-      perSystemSMModule =
-        { config, lib, ... }:
-        {
-          imports = [ (perSystemArgsModule config.nixpkgs.hostPlatform) ];
+          nixpkgs =
+            (lib.optionalAttrs ((nixpkgs.config or { }) != { }) {
+              config = nixpkgs.config;
+            })
+            // (lib.optionalAttrs ((nixpkgs.overlays or [ ]) != [ ]) {
+              overlays = nixpkgs.overlays;
+            });
         };
 
       home-manager =
@@ -232,10 +230,10 @@ in rec {
         hostname: homeManagerModule:
         let
           module =
-            { perSystem, config, ... }:
+            { perSystem, ... }:
             {
               imports = [ homeManagerModule ];
-              home-manager.sharedModules = [ perSystemHMModule ];
+              home-manager.sharedModules = [ perSystemModule ];
               home-manager.extraSpecialArgs = specialArgs;
               home-manager.users = homesNested.${hostname};
               home-manager.useGlobalPkgs = lib.mkDefault true;
@@ -243,6 +241,26 @@ in rec {
             };
         in
         lib.optional (builtins.hasAttr hostname homesNested) module;
+
+      homesGeneric =
+        let
+          getEntryPath =
+            _username: userEntry:
+            if builtins.pathExists (userEntry.path + "/home-configuration.nix") then
+              userEntry.path + "/home-configuration.nix"
+            else
+              # If we decide to add users/<username>.nix, it's as simple as
+              # testing `if userEntry.type == "regular"`
+              null;
+
+          mkUsers =
+            userEntries:
+            let
+              users = lib.mapAttrs getEntryPath userEntries;
+            in
+            lib.filterAttrs (_name: value: value != null) users;
+        in
+        importDir (src + "/users") mkUsers;
 
       # Attribute set mapping hostname (defined in hosts/) to a set of home
       # configurations (modules) for that host. If a host has no home
@@ -288,13 +306,12 @@ in rec {
               username,
               modulePath,
               pkgs,
-              system,
             }:
             home-manager.lib.homeManagerConfiguration {
               inherit pkgs;
               extraSpecialArgs = specialArgs;
               modules = [
-                (perSystemArgsModule system)
+                perSystemModule
                 modulePath
                 (
                   { config, ... }:
@@ -328,15 +345,18 @@ in rec {
           ) homesNested;
         in
         eachSystem (
-          { pkgs, system, ... }:
+          { pkgs, ... }:
           {
             homeConfigurations = lib.mapAttrs (
               _name: homeData:
               mkHomeConfiguration {
                 inherit (homeData) modulePath username;
-                inherit pkgs system;
-              }
-            ) homesFlat;
+                  inherit pkgs;
+                }
+              ) homesFlat
+              // lib.mapAttrs (
+                username: modulePath: mkHomeConfiguration { inherit pkgs username modulePath; }
+              ) homesGeneric;
           }
         );
 
@@ -345,45 +365,42 @@ in rec {
         let
           loadDefaultFn = { class, value }@inputs: inputs;
 
-          loadDefault = hostName: path: loadDefaultFn (import path { inherit flake inputs hostName; });
+          loadDefault = path: loadDefaultFn (import path { inherit flake inputs; });
 
-          loadNixOS = hostName: path: {
+
+          loadNixOS = hostname: path: {
             class = "nixos";
             value = inputs.nixpkgs.lib.nixosSystem {
               modules = [
+                nixpkgsConfigModule
                 perSystemModule
                 path
-              ] ++ mkHomeUsersModule hostName home-manager.nixosModules.default;
-              specialArgs = specialArgs // {
-                inherit hostName;
-              };
+              ] ++ mkHomeUsersModule hostname home-manager.nixosModules.default;
+              inherit specialArgs;
             };
           };
 
           loadNixOSRPi =
-            hostName: path:
+            hostname: path:
             let
               nixos-raspberrypi =
                 inputs.nixos-raspberrypi
                   or (throw ''${path} depends on nixos-raspberrypi. To fix this, add `inputs.nixos-raspberrypi.url = "github:nvmd/nixos-raspberrypi";` to your flake'');
             in
             {
-              class = "nixos";
+              class = "nixos-raspberrypi";
               value = nixos-raspberrypi.lib.nixosSystem {
                 modules = [
+                  nixpkgsConfigModule
                   perSystemModule
                   path
-                ]
-                ++ mkHomeUsersModule hostName home-manager.nixosModules.default;
-                specialArgs = specialArgs // {
-                  inherit hostName;
-                  nixos-raspberrypi = inputs.nixos-raspberrypi;
-                };
-              };
+                 ] ++ mkHomeUsersModule hostname home-manager.nixosModules.default;
+              inherit specialArgs;
             };
+          };
 
           loadNixDarwin =
-            hostName: path:
+            hostname: path:
             let
               nix-darwin =
                 inputs.nix-darwin
@@ -393,17 +410,16 @@ in rec {
               class = "nix-darwin";
               value = nix-darwin.lib.darwinSystem {
                 modules = [
+                  nixpkgsConfigModule
                   perSystemModule
                   path
-                ] ++ mkHomeUsersModule hostName home-manager.darwinModules.default;
-                specialArgs = specialArgs // {
-                  inherit hostName;
-                };
+                ] ++ mkHomeUsersModule hostname home-manager.darwinModules.default;
+                inherit specialArgs;
               };
             };
 
           loadSystemManager =
-            hostName: path:
+            hostname: path:
             let
               system-manager =
                 inputs.system-manager
@@ -413,11 +429,11 @@ in rec {
               class = "system-manager";
               value = system-manager.lib.makeSystemConfig {
                 modules = [
-                  perSystemSMModule
+                  perSystemModule
                   path
                 ];
                 extraSpecialArgs = specialArgs // {
-                  inherit hostName;
+                  inherit hostname;
                 };
               };
             };
@@ -426,7 +442,7 @@ in rec {
             name:
             { path, type }:
             if builtins.pathExists (path + "/default.nix") then
-              loadDefault name (path + "/default.nix")
+              loadDefault  (path + "/default.nix")
             else if builtins.pathExists (path + "/configuration.nix") then
               loadNixOS name (path + "/configuration.nix")
             else if builtins.pathExists (path + "/rpi-configuration.nix") then
@@ -620,7 +636,7 @@ in rec {
       # nix3 CLI output (`packages` output expects flat attrset)
       # FIXME: Find another way to make this work without introducing legacyPackages.
       #        May involve changing upstream home-manager.
-      legacyPackages = lib.optionalAttrs (homesNested != { }) standaloneHomeConfigurations;
+      legacyPackages = standaloneHomeConfigurations;
 
       darwinConfigurations = lib.mapAttrs (_: x: x.value) (hostsByCategory.darwinConfigurations or { });
       nixosConfigurations = lib.mapAttrs (_: x: x.value) (hostsByCategory.nixosConfigurations or { });
@@ -695,7 +711,15 @@ in rec {
                 path:
                 let
                   importChecksFn = lib.mapAttrs (
-                    pname: { type, path }: import path (systemArgs.${system} // { inherit pname; })
+                    pname: { type, path }: import path {
+                      inherit
+                        pname
+                        flake
+                        inputs
+                        system
+                        pkgs
+                        ;
+                    }
                   );
                 in
 
@@ -763,9 +787,386 @@ in rec {
     };
 
   tests = {
+    # Basic sanity test
     testPass = {
       expr = 1;
       expected = 1;
+    };
+
+    # Tests for filterPlatforms function
+    testFilterPlatformsEmptyMetaPlatforms = {
+      expr = filterPlatforms "x86_64-linux" {
+        foo = { meta.platforms = [ ]; };
+      };
+      expected = {
+        foo = { meta.platforms = [ ]; };
+      };
+    };
+
+    testFilterPlatformsNoMetaPlatforms = {
+      expr = filterPlatforms "x86_64-linux" {
+        foo = { };
+      };
+      expected = {
+        foo = { };
+      };
+    };
+
+    testFilterPlatformsMatchingPlatform = {
+      expr = filterPlatforms "x86_64-linux" {
+        foo = { meta.platforms = [ "x86_64-linux" "aarch64-linux" ]; };
+      };
+      expected = {
+        foo = { meta.platforms = [ "x86_64-linux" "aarch64-linux" ]; };
+      };
+    };
+
+    testFilterPlatformsNonMatchingPlatform = {
+      expr = filterPlatforms "x86_64-linux" {
+        foo = { meta.platforms = [ "aarch64-darwin" "x86_64-darwin" ]; };
+      };
+      expected = { };
+    };
+
+    testFilterPlatformsMixedPackages = {
+      expr = filterPlatforms "x86_64-linux" {
+        pkgAll = { };
+        pkgLinux = { meta.platforms = [ "x86_64-linux" ]; };
+        pkgDarwin = { meta.platforms = [ "x86_64-darwin" ]; };
+        pkgEmpty = { meta.platforms = [ ]; };
+      };
+      expected = {
+        pkgAll = { };
+        pkgLinux = { meta.platforms = [ "x86_64-linux" ]; };
+        pkgEmpty = { meta.platforms = [ ]; };
+      };
+    };
+
+    # Tests for withPrefix function
+    testWithPrefixEmpty = {
+      expr = withPrefix "test-" { };
+      expected = { };
+    };
+
+    testWithPrefixSingle = {
+      expr = withPrefix "pkg-" { foo = "bar"; };
+      expected = { "pkg-foo" = "bar"; };
+    };
+
+    testWithPrefixMultiple = {
+      expr = withPrefix "check-" {
+        foo = "bar";
+        baz = "qux";
+        test = 123;
+      };
+      expected = {
+        "check-foo" = "bar";
+        "check-baz" = "qux";
+        "check-test" = 123;
+      };
+    };
+
+    testWithPrefixEmptyPrefix = {
+      expr = withPrefix "" {
+        foo = "bar";
+        baz = "qux";
+      };
+      expected = {
+        foo = "bar";
+        baz = "qux";
+      };
+    };
+
+    testWithPrefixComplexValues = {
+      expr = withPrefix "devshell-" {
+        default = { a = 1; b = 2; };
+        custom = [ 1 2 3 ];
+      };
+      expected = {
+        "devshell-default" = { a = 1; b = 2; };
+        "devshell-custom" = [ 1 2 3 ];
+      };
+    };
+
+    # Tests for entriesPath function
+    testEntriesPathEmpty = {
+      expr = entriesPath { };
+      expected = { };
+    };
+
+    testEntriesPathSingle = {
+      expr = entriesPath {
+        foo = { path = /test/foo; type = "regular"; };
+      };
+      expected = {
+        foo = /test/foo;
+      };
+    };
+
+    testEntriesPathMultiple = {
+      expr = entriesPath {
+        foo = { path = /test/foo; type = "regular"; };
+        bar = { path = /test/bar; type = "directory"; };
+        baz = { path = /test/baz.nix; type = "regular"; };
+      };
+      expected = {
+        foo = /test/foo;
+        bar = /test/bar;
+        baz = /test/baz.nix;
+      };
+    };
+
+    # Tests for optionalPathAttrs function
+    testOptionalPathAttrsNonExistent = {
+      expr = optionalPathAttrs /nonexistent/path/that/does/not/exist (path: { found = true; });
+      expected = { };
+    };
+
+    testOptionalPathAttrsExistent = {
+      expr = optionalPathAttrs ./. (path: { found = true; inherit path; });
+      expected = { found = true; path = ./.; };
+    };
+
+    # Tests for tryImport function
+    testTryImportNonExistent = {
+      expr = tryImport /nonexistent/path/that/does/not/exist { };
+      expected = { };
+    };
+
+    testTryImportExistent = {
+      expr = tryImport ./default.nix { inherit inputs; };
+      expected = rec {
+        inherit
+          mkEachSystem
+          optionalPathAttrs
+          tryImport
+          importTomlFilesAt
+          importDir
+          entriesPath
+          withPrefix
+          filterPlatforms
+          mkBlueprint'
+          mkBlueprint
+          tests
+          __functor
+          ;
+      };
+    };
+
+    # Tests for importDir with mock filesystem paths
+    # Note: These tests verify the structure, actual file reading would require real files
+    testImportDirEmpty = {
+      expr = importDir /nonexistent/empty/path (entries: entries);
+      expected = { };
+    };
+
+    # Tests for importTomlFilesAt with mock filesystem paths
+    testImportTomlFilesAtEmpty = {
+      expr = importTomlFilesAt /nonexistent/empty/path (entries: entries);
+      expected = { };
+    };
+
+    # Test that mkBlueprint is a functor
+    testFunctorExists = {
+      expr = lib.isFunction __functor;
+      expected = true;
+    };
+
+    # Test that mkBlueprint is callable
+    testMkBlueprintIsFunction = {
+      expr = lib.isFunction mkBlueprint;
+      expected = true;
+    };
+
+    # Tests for mkEachSystem basic structure
+    testMkEachSystemSingleSystem = {
+      expr =
+        let
+          result = mkEachSystem {
+            inputs = { nixpkgs = inputs.nixpkgs; self = { }; _ = { }; };
+            flake = { };
+            systems = [ "x86_64-linux" ];
+            nixpkgs = { };
+            unfilteredPackages = { "x86_64-linux" = { }; };
+          };
+        in
+        {
+          hasEachSystem = lib.isFunction result.eachSystem;
+          hasSystemArgs = lib.isAttrs result.systemArgs;
+          systemCount = lib.length (lib.attrNames result.systemArgs);
+        };
+      expected = {
+        hasEachSystem = true;
+        hasSystemArgs = true;
+        systemCount = 1;
+      };
+    };
+
+    testMkEachSystemMultipleSystems = {
+      expr =
+        let
+          result = mkEachSystem {
+            inputs = { nixpkgs = inputs.nixpkgs; self = { }; _ = { }; };
+            flake = { };
+            systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" ];
+            nixpkgs = { };
+            unfilteredPackages = {
+              "x86_64-linux" = { };
+              "aarch64-linux" = { };
+              "x86_64-darwin" = { };
+            };
+          };
+        in
+        {
+          hasEachSystem = lib.isFunction result.eachSystem;
+          hasSystemArgs = lib.isAttrs result.systemArgs;
+          systemCount = lib.length (lib.attrNames result.systemArgs);
+          hasx86_64Linux = lib.hasAttr "x86_64-linux" result.systemArgs;
+          hasaarch64Linux = lib.hasAttr "aarch64-linux" result.systemArgs;
+          hasx86_64Darwin = lib.hasAttr "x86_64-darwin" result.systemArgs;
+        };
+      expected = {
+        hasEachSystem = true;
+        hasSystemArgs = true;
+        systemCount = 3;
+        hasx86_64Linux = true;
+        hasaarch64Linux = true;
+        hasx86_64Darwin = true;
+      };
+    };
+
+    testMkEachSystemEachSystemFunction = {
+      expr =
+        let
+          result = mkEachSystem {
+            inputs = { nixpkgs = inputs.nixpkgs; self = { }; _ = { }; };
+            flake = { };
+            systems = [ "x86_64-linux" "aarch64-linux" ];
+            nixpkgs = { };
+            unfilteredPackages = {
+              "x86_64-linux" = { };
+              "aarch64-linux" = { };
+            };
+          };
+          eachSystemResult = result.eachSystem (scope: { test = scope.system; });
+        in
+        {
+          isAttrs = lib.isAttrs eachSystemResult;
+          hasLinux = lib.hasAttr "x86_64-linux" eachSystemResult;
+          hasAarch64 = lib.hasAttr "aarch64-linux" eachSystemResult;
+          linuxValue = eachSystemResult."x86_64-linux".test or null;
+          aarch64Value = eachSystemResult."aarch64-linux".test or null;
+        };
+      expected = {
+        isAttrs = true;
+        hasLinux = true;
+        hasAarch64 = true;
+        linuxValue = "x86_64-linux";
+        aarch64Value = "aarch64-linux";
+      };
+    };
+
+    # Tests for importDir with real filesystem
+    testImportDirRealFiles = {
+      expr =
+        let
+          result = importDir ./test-fixtures/nix-files (entries: lib.attrNames entries);
+        in
+        {
+          hasFiles = lib.length result > 0;
+          hasFoo = lib.elem "foo" result;
+          hasBar = lib.elem "bar" result;
+          hasSubdir = lib.elem "subdir" result;
+          hasIgnoredTxt = lib.elem "ignored" result;
+        };
+      expected = {
+        hasFiles = true;
+        hasFoo = true;
+        hasBar = true;
+        hasSubdir = true;
+        hasIgnoredTxt = false;  # .txt files should be ignored
+      };
+    };
+
+    testImportDirWithPaths = {
+      expr =
+        let
+          result = importDir ./test-fixtures/nix-files entriesPath;
+        in
+        {
+          hasFoo = lib.hasAttr "foo" result;
+          hasBar = lib.hasAttr "bar" result;
+          hasSubdir = lib.hasAttr "subdir" result;
+          fooIsPath = lib.isPath result.foo or false;
+          subdirIsPath = lib.isPath result.subdir or false;
+        };
+      expected = {
+        hasFoo = true;
+        hasBar = true;
+        hasSubdir = true;
+        fooIsPath = true;
+        subdirIsPath = true;
+      };
+    };
+
+    testImportDirPrecedence = {
+      expr =
+        let
+          # If both foo.nix and foo/ exist, foo.nix should take precedence
+          result = importDir ./test-fixtures/nix-files (
+            entries:
+            lib.mapAttrs (_name: { type, ... }: type) entries
+          );
+        in
+        {
+          fooType = result.foo or null;
+          barType = result.bar or null;
+          subdirType = result.subdir or null;
+        };
+      expected = {
+        fooType = "regular";
+        barType = "regular";
+        subdirType = "directory";
+      };
+    };
+
+    # Tests for importTomlFilesAt with real filesystem
+    testImportTomlFilesAtRealFiles = {
+      expr =
+        let
+          result = importTomlFilesAt ./test-fixtures/toml-files (entries: lib.attrNames entries);
+        in
+        {
+          hasFiles = lib.length result > 0;
+          hasDevshell = lib.elem "devshell" result;
+          hasOther = lib.elem "other" result;
+          count = lib.length result;
+        };
+      expected = {
+        hasFiles = true;
+        hasDevshell = true;
+        hasOther = true;
+        count = 2;
+      };
+    };
+
+    testImportTomlFilesAtWithPaths = {
+      expr =
+        let
+          result = importTomlFilesAt ./test-fixtures/toml-files entriesPath;
+        in
+        {
+          hasDevshell = lib.hasAttr "devshell" result;
+          hasOther = lib.hasAttr "other" result;
+          devshellIsPath = lib.isPath result.devshell or false;
+          otherIsPath = lib.isPath result.other or false;
+        };
+      expected = {
+        hasDevshell = true;
+        hasOther = true;
+        devshellIsPath = true;
+        otherIsPath = true;
+      };
     };
   };
 
