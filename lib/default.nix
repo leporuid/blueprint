@@ -442,7 +442,7 @@ in rec {
             name:
             { path, type }:
             if builtins.pathExists (path + "/default.nix") then
-              loadDefault  (path + "/default.nix")
+              loadDefault (path + "/default.nix")
             else if builtins.pathExists (path + "/configuration.nix") then
               loadNixOS name (path + "/configuration.nix")
             else if builtins.pathExists (path + "/rpi-configuration.nix") then
