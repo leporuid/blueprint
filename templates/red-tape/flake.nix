@@ -1,5 +1,5 @@
 {
-  description = "description = "Red-tape template with Blueprint compatibility";
+  description = "Red-tape template with Blueprint compatibility";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs?ref=nixos-unstable";

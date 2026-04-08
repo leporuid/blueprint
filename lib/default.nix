@@ -423,7 +423,7 @@ in rec {
             let
               system-manager =
                 inputs.system-manager
-                  or (throw ''${path} depends on system-manager. To fix this, add `inputs.system-manager.url = "github:numtide/system-manager"; to your flake'');
+                  or (throw ''${path} depends on system-manager. To fix this, add `inputs.system-manager.url = "github:numtide/system-manager";` to your flake'');
             in
             {
               class = "system-manager";
@@ -442,7 +442,7 @@ in rec {
             name:
             { path, type }:
             if builtins.pathExists (path + "/default.nix") then
-              loadDefault  (path + "/default.nix")
+              loadDefault (path + "/default.nix")
             else if builtins.pathExists (path + "/configuration.nix") then
               loadNixOS name (path + "/configuration.nix")
             else if builtins.pathExists (path + "/rpi-configuration.nix") then
@@ -510,11 +510,13 @@ in rec {
       modules =
         let
           path = src + "/modules";
-          moduleDirs = builtins.attrNames (
-            lib.filterAttrs (_name: value: value == "directory") (builtins.readDir path)
-          );
         in
         lib.optionalAttrs (builtins.pathExists path) (
+          let
+            moduleDirs = builtins.attrNames (
+              lib.filterAttrs (_name: value: value == "directory") (builtins.readDir path)
+            );
+          in
           lib.genAttrs moduleDirs (
             name:
             lib.mapAttrs (_name: moduleDir: injectPublisherArgs moduleDir) (
@@ -555,10 +557,6 @@ in rec {
       );
 
       lib = tryImport (src + "/lib") specialArgs;
-
-      # expose the functor to the top-level
-      # FIXME: only if it exists
-      __functor = x: inputs.self.lib.__functor x;
 
       devShells =
         let
@@ -620,14 +618,7 @@ in rec {
             )
           );
 
-          merge =
-            prev: item:
-            let
-              systems = lib.attrNames (prev // item);
-              mergeSystem = system: { ${system} = (prev.${system} or { }) // (item.${system} or { }); };
-              mergedSystems = builtins.map mergeSystem systems;
-            in
-            lib.mergeAttrsList mergedSystems;
+          merge = lib.recursiveUpdate;
         in
         lib.foldl merge { } [
           namedToml
@@ -755,6 +746,10 @@ in rec {
           })
         )
       );
+    }
+    # expose the functor to the top-level, only if the user's lib exports one
+    // lib.optionalAttrs (inputs.self ? lib.__functor) {
+      __functor = x: inputs.self.lib.__functor x;
     };
 
   # Create a new flake blueprint
