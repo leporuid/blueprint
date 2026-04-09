@@ -35,15 +35,14 @@ in rec {
         let
           # Resolve the packages for each input.
           perSystem = lib.mapAttrs (
-           name: flake:
+            name: flake:
             # For self, we need to treat packages differently, see above
             if name == "_" then
-               flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
+              flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
+            else if name == "self" then
+              flake.legacyPackages.${system} or { } // unfilteredPackages.${system}
             else
-            if name == "self" then
-               flake.legacyPackages.${system} or { } // unfilteredPackages.${system}
-            else
-               flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
+              flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
           ) inputs;
 
           # Handle nixpkgs specially.
@@ -351,12 +350,12 @@ in rec {
               _name: homeData:
               mkHomeConfiguration {
                 inherit (homeData) modulePath username;
-                  inherit pkgs;
-                }
-              ) homesFlat
-              // lib.mapAttrs (
-                username: modulePath: mkHomeConfiguration { inherit pkgs username modulePath; }
-              ) homesGeneric;
+                inherit pkgs;
+              }
+            ) homesFlat
+            // lib.mapAttrs (
+              username: modulePath: mkHomeConfiguration { inherit pkgs username modulePath; }
+            ) homesGeneric;
           }
         );
 
@@ -366,7 +365,6 @@ in rec {
           loadDefaultFn = { class, value }@inputs: inputs;
 
           loadDefault = path: loadDefaultFn (import path { inherit flake inputs; });
-
 
           loadNixOS = hostname: path: {
             class = "nixos";
@@ -394,10 +392,10 @@ in rec {
                   nixpkgsConfigModule
                   perSystemModule
                   path
-                 ] ++ mkHomeUsersModule hostname home-manager.nixosModules.default;
-              inherit specialArgs;
+                ] ++ mkHomeUsersModule hostname home-manager.nixosModules.default;
+                inherit specialArgs;
+              };
             };
-          };
 
           loadNixDarwin =
             hostname: path:
@@ -442,7 +440,7 @@ in rec {
             name:
             { path, type }:
             if builtins.pathExists (path + "/default.nix") then
-              loadDefault  (path + "/default.nix")
+              loadDefault (path + "/default.nix")
             else if builtins.pathExists (path + "/configuration.nix") then
               loadNixOS name (path + "/configuration.nix")
             else if builtins.pathExists (path + "/rpi-configuration.nix") then
