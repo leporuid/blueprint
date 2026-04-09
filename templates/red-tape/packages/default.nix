@@ -1,0 +1,4 @@
+{ pkgs, ... }:
+{
+  hello = pkgs.hello;
+}

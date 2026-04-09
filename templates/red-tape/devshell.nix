@@ -1,13 +1,7 @@
 { pkgs }:
 pkgs.mkShell {
-  # Add build dependencies
-  packages = [ ];
-
-  # Add environment variables
-  env = { };
-
-  # Load custom bash code
-  shellHook = ''
-
-  '';
+  packages = [
+    pkgs.git
+    pkgs.nixfmt-rfc-style
+  ];
 }

@@ -1,13 +1,8 @@
 {
-  description = "Red-tape template with Blueprint compatibility";
+  description = "Red-tape template";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs?ref=nixos-unstable";
-
-    blueprint = {
-      url = "github:numtide/blueprint";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
 
     red-tape = {
       url = "github:phaer/red-tape";
@@ -15,8 +10,8 @@
     };
   };
 
-  outputs = inputs: (inputs.blueprint { inherit inputs; src = ./.; }) // {
-    # Re-export red-tape's mkFlake for direct access
-    inherit (inputs.red-tape) mkFlake;
+  outputs = inputs: inputs.red-tape.mkFlake {
+    inherit inputs;
+    src = ./.;
   };
 }
