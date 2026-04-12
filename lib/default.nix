@@ -35,12 +35,15 @@ in rec {
         let
           # Resolve the packages for each input.
           perSystem = lib.mapAttrs (
-            name: flake:
+           name: flake:
             # For self, we need to treat packages differently, see above
-            if name == "self" then
-              flake.legacyPackages.${system} or { } // unfilteredPackages.${system}
+            if name == "_" then
+               flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
             else
-              flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
+            if name == "self" then
+               flake.legacyPackages.${system} or { } // unfilteredPackages.${system}
+            else
+               flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
           ) inputs;
 
           # Handle nixpkgs specially.
@@ -54,7 +57,7 @@ in rec {
                 overlays = nixpkgs.overlays or [ ];
               };
         in
-        lib.makeScope lib.callPackageWith (_: {
+        lib.makeScope lib.callPackageWith (_: pkgs // {
           inherit
             inputs
             perSystem
@@ -182,27 +185,22 @@ in rec {
         systemArgs
         ;
 
-      # Adds the perSystem argument to the NixOS and Darwin modules
-      perSystemArgsModule = system: {
-        _module.args.perSystem = systemArgs.${system}.perSystem;
-      };
-
       perSystemModule =
-        { config, lib, ... }:
+        { pkgs, ... }:
         {
-          imports = [ (perSystemArgsModule config.nixpkgs.hostPlatform.system) ];
+          _module.args.perSystem = systemArgs.${pkgs.stdenv.hostPlatform.system}.perSystem;
         };
 
-      perSystemHMModule =
-        { osConfig, ... }:
+      nixpkgsConfigModule =
+        { lib, ... }:
         {
-          imports = [ (perSystemArgsModule osConfig.nixpkgs.hostPlatform.system) ];
-        };
-
-      perSystemSMModule =
-        { config, lib, ... }:
-        {
-          imports = [ (perSystemArgsModule config.nixpkgs.hostPlatform) ];
+          nixpkgs =
+            (lib.optionalAttrs ((nixpkgs.config or { }) != { }) {
+              config = nixpkgs.config;
+            })
+            // (lib.optionalAttrs ((nixpkgs.overlays or [ ]) != [ ]) {
+              overlays = nixpkgs.overlays;
+            });
         };
 
       home-manager =
@@ -232,10 +230,10 @@ in rec {
         hostname: homeManagerModule:
         let
           module =
-            { perSystem, config, ... }:
+            { perSystem, ... }:
             {
               imports = [ homeManagerModule ];
-              home-manager.sharedModules = [ perSystemHMModule ];
+              home-manager.sharedModules = [ perSystemModule ];
               home-manager.extraSpecialArgs = specialArgs;
               home-manager.users = homesNested.${hostname};
               home-manager.useGlobalPkgs = lib.mkDefault true;
@@ -243,6 +241,26 @@ in rec {
             };
         in
         lib.optional (builtins.hasAttr hostname homesNested) module;
+
+      homesGeneric =
+        let
+          getEntryPath =
+            _username: userEntry:
+            if builtins.pathExists (userEntry.path + "/home-configuration.nix") then
+              userEntry.path + "/home-configuration.nix"
+            else
+              # If we decide to add users/<username>.nix, it's as simple as
+              # testing `if userEntry.type == "regular"`
+              null;
+
+          mkUsers =
+            userEntries:
+            let
+              users = lib.mapAttrs getEntryPath userEntries;
+            in
+            lib.filterAttrs (_name: value: value != null) users;
+        in
+        importDir (src + "/users") mkUsers;
 
       # Attribute set mapping hostname (defined in hosts/) to a set of home
       # configurations (modules) for that host. If a host has no home
@@ -288,13 +306,12 @@ in rec {
               username,
               modulePath,
               pkgs,
-              system,
             }:
             home-manager.lib.homeManagerConfiguration {
               inherit pkgs;
               extraSpecialArgs = specialArgs;
               modules = [
-                (perSystemArgsModule system)
+                perSystemModule
                 modulePath
                 (
                   { config, ... }:
@@ -328,15 +345,18 @@ in rec {
           ) homesNested;
         in
         eachSystem (
-          { pkgs, system, ... }:
+          { pkgs, ... }:
           {
             homeConfigurations = lib.mapAttrs (
               _name: homeData:
               mkHomeConfiguration {
                 inherit (homeData) modulePath username;
-                inherit pkgs system;
-              }
-            ) homesFlat;
+                  inherit pkgs;
+                }
+              ) homesFlat
+              // lib.mapAttrs (
+                username: modulePath: mkHomeConfiguration { inherit pkgs username modulePath; }
+              ) homesGeneric;
           }
         );
 
@@ -345,45 +365,42 @@ in rec {
         let
           loadDefaultFn = { class, value }@inputs: inputs;
 
-          loadDefault = hostName: path: loadDefaultFn (import path { inherit flake inputs hostName; });
+          loadDefault = path: loadDefaultFn (import path { inherit flake inputs; });
 
-          loadNixOS = hostName: path: {
+
+          loadNixOS = hostname: path: {
             class = "nixos";
             value = inputs.nixpkgs.lib.nixosSystem {
               modules = [
+                nixpkgsConfigModule
                 perSystemModule
                 path
-              ] ++ mkHomeUsersModule hostName home-manager.nixosModules.default;
-              specialArgs = specialArgs // {
-                inherit hostName;
-              };
+              ] ++ mkHomeUsersModule hostname home-manager.nixosModules.default;
+              inherit specialArgs;
             };
           };
 
           loadNixOSRPi =
-            hostName: path:
+            hostname: path:
             let
               nixos-raspberrypi =
                 inputs.nixos-raspberrypi
                   or (throw ''${path} depends on nixos-raspberrypi. To fix this, add `inputs.nixos-raspberrypi.url = "github:nvmd/nixos-raspberrypi";` to your flake'');
             in
             {
-              class = "nixos";
+              class = "nixos-raspberrypi";
               value = nixos-raspberrypi.lib.nixosSystem {
                 modules = [
+                  nixpkgsConfigModule
                   perSystemModule
                   path
-                ]
-                ++ mkHomeUsersModule hostName home-manager.nixosModules.default;
-                specialArgs = specialArgs // {
-                  inherit hostName;
-                  nixos-raspberrypi = inputs.nixos-raspberrypi;
-                };
-              };
+                 ] ++ mkHomeUsersModule hostname home-manager.nixosModules.default;
+              inherit specialArgs;
             };
+          };
 
           loadNixDarwin =
-            hostName: path:
+            hostname: path:
             let
               nix-darwin =
                 inputs.nix-darwin
@@ -393,17 +410,16 @@ in rec {
               class = "nix-darwin";
               value = nix-darwin.lib.darwinSystem {
                 modules = [
+                  nixpkgsConfigModule
                   perSystemModule
                   path
-                ] ++ mkHomeUsersModule hostName home-manager.darwinModules.default;
-                specialArgs = specialArgs // {
-                  inherit hostName;
-                };
+                ] ++ mkHomeUsersModule hostname home-manager.darwinModules.default;
+                inherit specialArgs;
               };
             };
 
           loadSystemManager =
-            hostName: path:
+            hostname: path:
             let
               system-manager =
                 inputs.system-manager
@@ -413,11 +429,11 @@ in rec {
               class = "system-manager";
               value = system-manager.lib.makeSystemConfig {
                 modules = [
-                  perSystemSMModule
+                  perSystemModule
                   path
                 ];
                 extraSpecialArgs = specialArgs // {
-                  inherit hostName;
+                  inherit hostname;
                 };
               };
             };
@@ -426,7 +442,7 @@ in rec {
             name:
             { path, type }:
             if builtins.pathExists (path + "/default.nix") then
-              loadDefault name (path + "/default.nix")
+              loadDefault  (path + "/default.nix")
             else if builtins.pathExists (path + "/configuration.nix") then
               loadNixOS name (path + "/configuration.nix")
             else if builtins.pathExists (path + "/rpi-configuration.nix") then
@@ -629,7 +645,7 @@ in rec {
       # nix3 CLI output (`packages` output expects flat attrset)
       # FIXME: Find another way to make this work without introducing legacyPackages.
       #        May involve changing upstream home-manager.
-      legacyPackages = lib.optionalAttrs (homesNested != { }) standaloneHomeConfigurations;
+      legacyPackages = standaloneHomeConfigurations;
 
       darwinConfigurations = lib.mapAttrs (_: x: x.value) (hostsByCategory.darwinConfigurations or { });
       nixosConfigurations = lib.mapAttrs (_: x: x.value) (hostsByCategory.nixosConfigurations or { });
@@ -704,7 +720,15 @@ in rec {
                 path:
                 let
                   importChecksFn = lib.mapAttrs (
-                    pname: { type, path }: import path (systemArgs.${system} // { inherit pname; })
+                    pname: { type, path }: import path {
+                      inherit
+                        pname
+                        flake
+                        inputs
+                        system
+                        pkgs
+                        ;
+                    }
                   );
                 in
 
