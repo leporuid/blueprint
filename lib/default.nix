@@ -33,18 +33,10 @@ in rec {
       systemArgs = lib.genAttrs systems (
         system:
         let
-          # Resolve the packages for each input.
-          perSystem = lib.mapAttrs (
-           name: flake:
-            # For self, we need to treat packages differently, see above
-            if name == "_" then
-               flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
-            else
-            if name == "self" then
-               flake.legacyPackages.${system} or { } // unfilteredPackages.${system}
-            else
-               flake.legacyPackages.${system} or { } // flake.packages.${system} or { }
-          ) inputs;
+          perSystem = mkPerSystem {
+            inherit inputs system;
+            selfPackages = unfilteredPackages.${system};
+          };
 
           # Handle nixpkgs specially.
           pkgs =
@@ -57,7 +49,7 @@ in rec {
                 overlays = nixpkgs.overlays or [ ];
               };
         in
-        lib.makeScope lib.callPackageWith (_: pkgs // {
+        lib.makeScope lib.callPackageWith (_: {
           inherit
             inputs
             perSystem
@@ -147,6 +139,24 @@ in rec {
       }
     );
 
+  # Resolve perSystem.<input> for every flake input. For inputs.self,
+  # `selfPackages` is merged instead of `self.packages.${system}` so the
+  # caller can break the packages → filterPlatforms → perSystem.self
+  # → packages cycle (see the comment on `unfilteredPackages` in
+  # mkEachSystem) and, in the overlay case, point intra-set references
+  # at the set built against the caller's nixpkgs.
+  mkPerSystem =
+    {
+      inputs,
+      system,
+      selfPackages,
+    }:
+    lib.mapAttrs (
+      name: input:
+      (input.legacyPackages.${system} or { })
+      // (if name == "self" then selfPackages else input.packages.${system} or { })
+    ) inputs;
+
   filterPlatforms =
     system: attrs:
     lib.filterAttrs (
@@ -185,23 +195,48 @@ in rec {
         systemArgs
         ;
 
+      # Adds the perSystem argument to the NixOS and Darwin modules
+      perSystemArgsModule = system: {
+        _module.args.perSystem = systemArgs.${system}.perSystem;
+      };
+
+      # Adds the perSystem argument to the NixOS and Darwin modules
       perSystemModule =
-        { pkgs, ... }:
+        { config, lib, ... }:
         {
-          _module.args.perSystem = systemArgs.${pkgs.stdenv.hostPlatform.system}.perSystem;
+          imports = [ (perSystemArgsModule config.nixpkgs.hostPlatform.system) ];
         };
 
-      nixpkgsConfigModule =
-        { lib, ... }:
+      perSystemHMModule =
+        { osConfig, ... }:
         {
-          nixpkgs =
-            (lib.optionalAttrs ((nixpkgs.config or { }) != { }) {
-              config = nixpkgs.config;
-            })
-            // (lib.optionalAttrs ((nixpkgs.overlays or [ ]) != [ ]) {
-              overlays = nixpkgs.overlays;
-            });
+          imports = [ (perSystemArgsModule osConfig.nixpkgs.hostPlatform.system) ];
         };
+
+      perSystemSMModule =
+        { config, lib, ... }:
+        {
+          imports = [ (perSystemArgsModule config.nixpkgs.hostPlatform) ];
+        };
+
+      # Share the per-system pkgs blueprint already instantiated (with the
+      # configured nixpkgs.config/overlays applied) instead of having the
+      # NixOS/nix-darwin module system import nixpkgs a second time with
+      # the same settings.
+      #
+      # Only injected when blueprint actually has config/overlays to
+      # propagate; otherwise hosts keep full control of their nixpkgs.*
+      # options. mkDefault so a host can still set its own nixpkgs.pkgs.
+      nixpkgsConfigModule =
+        if (nixpkgs.config or { }) == { } && (nixpkgs.overlays or [ ]) == [ ] then
+          { }
+        else
+          (
+            { config, lib, ... }:
+            {
+              nixpkgs.pkgs = lib.mkDefault systemArgs.${config.nixpkgs.hostPlatform.system}.pkgs;
+            }
+          );
 
       home-manager =
         inputs.home-manager
@@ -230,10 +265,10 @@ in rec {
         hostname: homeManagerModule:
         let
           module =
-            { perSystem, ... }:
+            { perSystem, config, ... }:
             {
               imports = [ homeManagerModule ];
-              home-manager.sharedModules = [ perSystemModule ];
+              home-manager.sharedModules = [ perSystemHMModule ];
               home-manager.extraSpecialArgs = specialArgs;
               home-manager.users = homesNested.${hostname};
               home-manager.useGlobalPkgs = lib.mkDefault true;
@@ -242,6 +277,7 @@ in rec {
         in
         lib.optional (builtins.hasAttr hostname homesNested) module;
 
+      # Generic users not tied to a host: users/<username>/home-configuration.nix
       homesGeneric =
         let
           getEntryPath =
@@ -306,12 +342,13 @@ in rec {
               username,
               modulePath,
               pkgs,
+              system,
             }:
             home-manager.lib.homeManagerConfiguration {
               inherit pkgs;
               extraSpecialArgs = specialArgs;
               modules = [
-                perSystemModule
+                (perSystemArgsModule system)
                 modulePath
                 (
                   { config, ... }:
@@ -345,18 +382,23 @@ in rec {
           ) homesNested;
         in
         eachSystem (
-          { pkgs, ... }:
+          { pkgs, system, ... }:
           {
-            homeConfigurations = lib.mapAttrs (
-              _name: homeData:
-              mkHomeConfiguration {
-                inherit (homeData) modulePath username;
-                  inherit pkgs;
+            homeConfigurations =
+              (lib.mapAttrs (
+                _name: homeData:
+                mkHomeConfiguration {
+                  inherit (homeData) modulePath username;
+                  inherit pkgs system;
                 }
-              ) homesFlat
-              // lib.mapAttrs (
-                username: modulePath: mkHomeConfiguration { inherit pkgs username modulePath; }
-              ) homesGeneric;
+              ) homesFlat)
+              // (lib.mapAttrs (
+                username: modulePath:
+                mkHomeConfiguration {
+                  inherit pkgs system username;
+                  modulePath = modulePath;
+                }
+              ) homesGeneric);
           }
         );
 
@@ -365,42 +407,47 @@ in rec {
         let
           loadDefaultFn = { class, value }@inputs: inputs;
 
-          loadDefault = path: loadDefaultFn (import path { inherit flake inputs; });
+          loadDefault = hostName: path: loadDefaultFn (import path { inherit flake inputs hostName; });
 
-
-          loadNixOS = hostname: path: {
+          loadNixOS = hostName: path: {
             class = "nixos";
             value = inputs.nixpkgs.lib.nixosSystem {
               modules = [
                 nixpkgsConfigModule
                 perSystemModule
                 path
-              ] ++ mkHomeUsersModule hostname home-manager.nixosModules.default;
-              inherit specialArgs;
+              ] ++ mkHomeUsersModule hostName home-manager.nixosModules.default;
+              specialArgs = specialArgs // {
+                inherit hostName;
+              };
             };
           };
 
           loadNixOSRPi =
-            hostname: path:
+            hostName: path:
             let
               nixos-raspberrypi =
                 inputs.nixos-raspberrypi
                   or (throw ''${path} depends on nixos-raspberrypi. To fix this, add `inputs.nixos-raspberrypi.url = "github:nvmd/nixos-raspberrypi";` to your flake'');
             in
             {
-              class = "nixos-raspberrypi";
+              class = "nixos";
               value = nixos-raspberrypi.lib.nixosSystem {
                 modules = [
                   nixpkgsConfigModule
                   perSystemModule
                   path
-                 ] ++ mkHomeUsersModule hostname home-manager.nixosModules.default;
-              inherit specialArgs;
+                ]
+                ++ mkHomeUsersModule hostName home-manager.nixosModules.default;
+                specialArgs = specialArgs // {
+                  inherit hostName;
+                  nixos-raspberrypi = inputs.nixos-raspberrypi;
+                };
+              };
             };
-          };
 
           loadNixDarwin =
-            hostname: path:
+            hostName: path:
             let
               nix-darwin =
                 inputs.nix-darwin
@@ -413,13 +460,15 @@ in rec {
                   nixpkgsConfigModule
                   perSystemModule
                   path
-                ] ++ mkHomeUsersModule hostname home-manager.darwinModules.default;
-                inherit specialArgs;
+                ] ++ mkHomeUsersModule hostName home-manager.darwinModules.default;
+                specialArgs = specialArgs // {
+                  inherit hostName;
+                };
               };
             };
 
           loadSystemManager =
-            hostname: path:
+            hostName: path:
             let
               system-manager =
                 inputs.system-manager
@@ -429,11 +478,11 @@ in rec {
               class = "system-manager";
               value = system-manager.lib.makeSystemConfig {
                 modules = [
-                  perSystemModule
+                  perSystemSMModule
                   path
                 ];
                 extraSpecialArgs = specialArgs // {
-                  inherit hostname;
+                  inherit hostName;
                 };
               };
             };
@@ -442,7 +491,7 @@ in rec {
             name:
             { path, type }:
             if builtins.pathExists (path + "/default.nix") then
-              loadDefault  (path + "/default.nix")
+              loadDefault name (path + "/default.nix")
             else if builtins.pathExists (path + "/configuration.nix") then
               loadNixOS name (path + "/configuration.nix")
             else if builtins.pathExists (path + "/rpi-configuration.nix") then
@@ -523,29 +572,56 @@ in rec {
           )
         );
 
+      packageEntries =
+        (optionalPathAttrs (src + "/packages") (path: importDir path lib.id))
+        // (optionalPathAttrs (src + "/package.nix") (path: {
+          default = {
+            inherit path;
+          };
+        }))
+        // (optionalPathAttrs (src + "/formatter.nix") (path: {
+          formatter = {
+            inherit path;
+          };
+        }));
+
       # See the comment in mkEachSystem
       unfilteredPackages =
         lib.traceIf (builtins.pathExists (src + "/pkgs")) "blueprint: the /pkgs folder is now /packages"
-          (
-            let
-              entries =
-                (optionalPathAttrs (src + "/packages") (path: importDir path lib.id))
-                // (optionalPathAttrs (src + "/package.nix") (path: {
-                  default = {
-                    inherit path;
-                  };
-                }))
-                // (optionalPathAttrs (src + "/formatter.nix") (path: {
-                  formatter = {
-                    inherit path;
-                  };
-                }));
-            in
-            eachSystem (
-              { newScope, system, ... }:
-              lib.mapAttrs (pname: { path, ... }: newScope { inherit pname; } path { }) entries
-            )
-          );
+          (eachSystem ({ pkgs, ... }: mkPackagesFor pkgs));
+
+      # Load the packages/ tree against a given nixpkgs instance.
+      # Packages get the same scope arguments as via systemArgs (pkgs,
+      # flake, inputs, system, perSystem, pname). perSystem.self resolves
+      # within this scope so intra-set references stay consistent with
+      # the supplied nixpkgs.
+      #
+      # Used internally for packages.<system> (with blueprint's own
+      # pkgs) and exposed so consumers can build an overlay that uses
+      # their pkgs instead.
+      mkPackagesFor =
+        pkgs:
+        let
+          system = pkgs.stdenv.hostPlatform.system;
+          scope = lib.makeScope lib.callPackageWith (self: {
+            inherit
+              inputs
+              flake
+              pkgs
+              system
+              ;
+            perSystem = mkPerSystem {
+              inherit inputs system;
+              selfPackages = self.packageSet;
+            };
+            # NB: lib.makeScope reserves `packages` for its generator
+            # function, so the result lives under a different name.
+            packageSet = lib.mapAttrs (
+              pname: { path, ... }: self.newScope { inherit pname; } path { }
+            ) packageEntries;
+          });
+        in
+        scope.packageSet;
     in
     # FIXME: maybe there are two layers to this. The blueprint, and then the mapping to flake outputs.
     {
@@ -639,13 +715,15 @@ in rec {
       # See the comment in mkEachSystem
       packages = lib.mapAttrs filterPlatforms unfilteredPackages;
 
+      inherit mkPackagesFor;
+
       # Defining homeConfigurations under legacyPackages allows the home-manager CLI
       # to automatically detect the right output for the current system without
       # either manually defining the pkgs set (requires explicit system) or breaking
       # nix3 CLI output (`packages` output expects flat attrset)
       # FIXME: Find another way to make this work without introducing legacyPackages.
       #        May involve changing upstream home-manager.
-      legacyPackages = standaloneHomeConfigurations;
+      legacyPackages = lib.optionalAttrs (homesNested != { }) standaloneHomeConfigurations;
 
       darwinConfigurations = lib.mapAttrs (_: x: x.value) (hostsByCategory.darwinConfigurations or { });
       nixosConfigurations = lib.mapAttrs (_: x: x.value) (hostsByCategory.nixosConfigurations or { });
@@ -720,15 +798,7 @@ in rec {
                 path:
                 let
                   importChecksFn = lib.mapAttrs (
-                    pname: { type, path }: import path {
-                      inherit
-                        pname
-                        flake
-                        inputs
-                        system
-                        pkgs
-                        ;
-                    }
+                    pname: { type, path }: import path (systemArgs.${system} // { inherit pname; })
                   );
                 in
 
