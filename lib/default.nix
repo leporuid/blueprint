@@ -630,7 +630,7 @@ in rec {
         perSystem.self.formatter or pkgs.nixfmt-tree
       );
 
-      lib = tryImport (src + "/lib") specialArgs;lib =
+      lib =
         let
           # Load all lib/{*,*/default}.nix files
           fullLib = importDir (src + "/lib") (lib.mapAttrs (
