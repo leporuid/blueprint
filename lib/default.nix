@@ -594,7 +594,7 @@ rec {
         eachSystem (
           { pkgs, system, ... }:
           {
-            homeConfigurations = lib.mapAttrs (
+            homeConfigurations = (lib.mapAttrs (
               _name: homeData:
               mkHomeConfiguration {
                 inherit (homeData) modulePath username;
