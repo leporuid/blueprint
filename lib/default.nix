@@ -594,22 +594,19 @@ rec {
         eachSystem (
           { pkgs, system, ... }:
           {
-            homeConfigurations = (lib.mapAttrs (
-              _name: homeData:
-              mkHomeConfiguration {
-                inherit (homeData) modulePath username;
-                inherit pkgs system;
-              }
-            ) homesFlat)
-              // (lib.mapAttrs (
-                username: modulePath:
+            homeConfigurations = 
+              lib.mapAttrs (
+                _name: homeData:
                 mkHomeConfiguration {
-                  inherit pkgs system username;
-                  modulePath = modulePath;
+                  inherit (homeData) modulePath username;
+                  inherit pkgs system;
                 }
-              ) homesGeneric);
-          }
-        );
+              ) homesFlat
+              // lib.mapAttrs (
+                username: modulePath: mkHomeConfiguration { inherit pkgs system username modulePath; }
+            ) homesGeneric;
+            }
+          );
 
       hosts = importDir (src + "/hosts") (
         entries:
@@ -958,7 +955,7 @@ rec {
       # nix3 CLI output (`packages` output expects flat attrset)
       # FIXME: Find another way to make this work without introducing legacyPackages.
       #        May involve changing upstream home-manager.
-      legacyPackages = lib.optionalAttrs (homesNested != { }) standaloneHomeConfigurations;
+      legacyPackages = standaloneHomeConfigurations;
 
       darwinConfigurations = lib.mapAttrs (_: x: x.value) (hostsByCategory.darwinConfigurations or { });
       nixosConfigurations = lib.mapAttrs (_: x: x.value) (hostsByCategory.nixosConfigurations or { });
