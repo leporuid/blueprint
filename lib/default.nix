@@ -764,7 +764,7 @@ rec {
         if expectsPublisherArgs module then
           lib.setDefaultModuleLocation modulePath (module publisherArgs)
         else
-          modulePath;
+          lib.setDefaultModuleLocation modulePath module;
 
       modules =
         let
