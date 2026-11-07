@@ -487,16 +487,16 @@ rec {
         in
         lib.optional (builtins.hasAttr hostname homesNested) module;
 
-      # Generic users not tied to a host: users/<username>/home-configuration.nix
+      # Generic users not tied to a host: users/<username>/home-configuration.nix or users/<username>.nix
       homesGeneric =
         let
           getEntryPath =
             _username: userEntry:
-            if builtins.pathExists (userEntry.path + "/home-configuration.nix") then
+            if userEntry.type == "regular" && lib.hasSuffix ".nix" userEntry.path then
+              userEntry.path
+            else if builtins.pathExists (userEntry.path + "/home-configuration.nix") then
               userEntry.path + "/home-configuration.nix"
             else
-              # If we decide to add users/<username>.nix, it's as simple as
-              # testing `if userEntry.type == "regular"`
               null;
 
           mkUsers =
@@ -626,6 +626,9 @@ rec {
               ++ mkHomeUsersModule hostName home-manager.nixosModules.default;
               specialArgs = specialArgs // {
                 inherit hostName;
+                isNixOS = true;
+                isDarwin = false;
+                class = "nixos";
               };
             };
           };
@@ -649,6 +652,9 @@ rec {
                 specialArgs = specialArgs // {
                   inherit hostName;
                   nixos-raspberrypi = inputs.nixos-raspberrypi;
+                  isNixOS = true;
+                  isDarwin = false;
+                  class = "nixos";
                 };
               };
             };
@@ -671,6 +677,9 @@ rec {
                 ++ mkHomeUsersModule hostName home-manager.darwinModules.default;
                 specialArgs = specialArgs // {
                   inherit hostName;
+                  isDarwin = true;
+                  isNixOS = false;
+                  class = "nix-darwin";
                 };
               };
             };
@@ -693,6 +702,9 @@ rec {
                 ++ mkHomeUsersModule hostName home-manager.nixosModules.default;
                 extraSpecialArgs = specialArgs // {
                   inherit hostName;
+                  isDarwin = false;
+                  isNixOS = false;
+                  class = "system-manager";
                 };
               };
             };
@@ -1020,10 +1032,16 @@ rec {
             ))
             # add darwin system closures to checks
             (withPrefix "darwin-" (
-              lib.mapAttrs (_: x: x.system) (
+              lib.mapAttrs (_: x: x.config.system.build.toplevel) (
                 lib.filterAttrs (_: x: x.pkgs.stdenv.hostPlatform.system == system) (
                   inputs.self.darwinConfigurations or { }
                 )
+              )
+            ))
+            # add home-manager standalone closures to checks
+            (withPrefix "home-" (
+              lib.mapAttrs (_: x: x.activationPackage) (
+                inputs.self.legacyPackages.${system}.homeConfigurations or { }
               )
             ))
             # add system-manager closures to checks
