@@ -120,6 +120,6 @@ nav:
     - Library Reference: reference/lib_reference.md
 
 plugins:
-    - awesome-pages
+    - awesome-nav
     - mike
     - search
